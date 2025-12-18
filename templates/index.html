@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Voice Chatbot</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+    background: #111;
+    color: #fff;
+            display: flex;
+    justify-content: center;
+            align-items: center;
+    height: 100vh;
+        }
+        .container {
+    width: 420px;
+    background: #1e1e1e;
+    padding: 20px;
+    border-radius: 10px;
+}
+textarea {
+    width: 100%;
+    height: 80px;
+    background: #000;
+    color: #0f0;
+    padding: 10px;
+    border-radius: 5px;
+    border: none;
+    resize: none;
+}
+button {
+            width: 100%;
+    padding: 12px;
+    margin-top: 10px;
+    background: #0a84ff;
+    color: white;
+            border: none;
+    border-radius: 5px;
+    font-size: 16px;
+            cursor: pointer;
+}
+.reply {
+    margin-top: 15px;
+    color: #0f0;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h3>🎤 Voice Chatbot</h3>
+    <textarea id="inputText" placeholder="Speak..."></textarea>
+    <button id="micButton">🎙 Start / Stop Mic</button>
+    <button id="sendButton" style="margin-top:8px;background:#22c55e;">Send to AI now</button>
+    <div style="margin-top:10px;color:#999;font-size:14px;" id="status">Ready</div>
+    <div class="reply" id="reply"></div>
+</div>
+
+<script>
+    let recognition = null;
+let isListening = false;
+    let finalTranscript = "";
+let pauseTimer = null;
+
+function initRecognition() {
+    if (recognition) return;
+
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+        alert("Speech recognition not supported in this browser. Please use Chrome desktop.");
+            return;
+        }
+
+        recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onresult = function(event) {
+        console.log("SpeechRecognition result:", event);
+            let interim = "";
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                const res = event.results[i];
+                if (res.isFinal) {
+                    finalTranscript += res[0].transcript + " ";
+                } else {
+                    interim += res[0].transcript;
+                }
+            }
+
+        // Live text while speaking: final + current interim
+        const liveText = (finalTranscript + interim).trim();
+        document.getElementById("inputText").value = liveText;
+
+        // Reset / start pause timer: after 0.7s of no new audio, send to OpenAI
+        if (pauseTimer) clearTimeout(pauseTimer);
+        pauseTimer = setTimeout(() => {
+            const textToSend = finalTranscript.trim();
+            if (textToSend) {
+                console.log("✅ Pause detected! Sending to OpenAI:", textToSend);
+                sendToServer(textToSend);
+                finalTranscript = "";
+                document.getElementById("inputText").value = "";
+            }
+        }, 700); // 0.7 second pause for faster response
+    };
+
+    recognition.onerror = function(event) {
+        console.error("SpeechRecognition error:", event);
+        alert("Speech recognition error: " + event.error);
+        isListening = false;
+        document.getElementById("micButton").textContent = "🎙 Start Mic";
+    };
+
+    recognition.onend = function() {
+        console.log("SpeechRecognition ended");
+        isListening = false;
+        document.getElementById("micButton").textContent = "🎙 Start Mic";
+    };
+}
+
+function toggleMic() {
+    initRecognition();
+        if (!recognition) return;
+
+    if (!isListening) {
+        console.log("Starting SpeechRecognition");
+        recognition.start();
+        isListening = true;
+        document.getElementById("micButton").textContent = "⏹ Stop Mic";
+    } else {
+        console.log("Stopping SpeechRecognition");
+        recognition.stop();
+        // onend will flip isListening false
+    }
+}
+
+let audioQueue = [];
+let isPlayingAudio = false;
+
+function playNextAudio() {
+    if (audioQueue.length === 0) {
+        isPlayingAudio = false;
+        console.log("🔊 Audio queue empty, resuming mic...");
+        
+        // Auto-resume mic after AI finishes speaking (prevent feedback loop)
+        if (!isListening && recognition) {
+            setTimeout(() => {
+                try {
+                    recognition.start();
+                    isListening = true;
+                    document.getElementById("micButton").textContent = "⏹ Stop Mic";
+                    document.getElementById("status").textContent = "🎤 Listening again...";
+                } catch (e) {
+                    console.log("Mic already running or error:", e);
+                }
+            }, 500);  // Small delay to avoid picking up tail of audio
+        }
+        return;
+    }
+
+    isPlayingAudio = true;
+    const audioData = audioQueue.shift();
+    const audio = new Audio(`data:${audioData.mime};base64,${audioData.data}`);
+    
+    audio.onended = () => {
+        console.log("🔊 Audio chunk finished, playing next...");
+        playNextAudio();  // Play next in queue
+    };
+    
+    audio.onerror = (e) => {
+        console.error("Audio play error:", e);
+        playNextAudio();  // Try next even if this one fails
+    };
+    
+    audio.play().catch(err => {
+        console.error("Audio play error:", err);
+        playNextAudio();
+    });
+}
+
+function sendToServer(text) {
+    if (!text.trim()) return;
+
+    const statusDiv = document.getElementById("status");
+    const replyDiv = document.getElementById("reply");
+    
+    statusDiv.textContent = "⏳ Sending to AI...";
+    replyDiv.innerText = "🤖 AI: ";
+    
+    // Stop mic to prevent feedback loop (AI hearing itself)
+    if (isListening && recognition) {
+        console.log("🔇 Stopping mic to prevent feedback loop...");
+        try {
+            recognition.stop();
+            isListening = false;
+            document.getElementById("micButton").textContent = "🎙 Start Mic";
+        } catch (e) {
+            console.log("Mic stop error:", e);
+        }
+    }
+
+    // Clear audio queue
+    audioQueue = [];
+    isPlayingAudio = false;
+
+    // Use Server-Sent Events for real-time streaming
+    fetch("/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ text })
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error("Server returned " + response.status);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        function processStream() {
+            reader.read().then(({ done, value }) => {
+                if (done) {
+                    statusDiv.textContent = "✅ Done!";
+                    setTimeout(() => { statusDiv.textContent = "Ready"; }, 2000);
+                    return;
+                }
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop(); // Keep incomplete line in buffer
+
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const dataStr = line.slice(6);
+                        if (dataStr === '[DONE]') {
+                            // If no audio was queued, resume mic now
+                            if (!isPlayingAudio && audioQueue.length === 0) {
+                                setTimeout(() => {
+                                    if (!isListening && recognition) {
+                                        try {
+                                            recognition.start();
+                                            isListening = true;
+                                            document.getElementById("micButton").textContent = "⏹ Stop Mic";
+                                            statusDiv.textContent = "🎤 Listening...";
+                                        } catch (e) {
+                                            console.log("Mic already running:", e);
+                                        }
+                                    }
+                                }, 500);
+                            }
+                            return;
+                        }
+
+                        try {
+                            const data = JSON.parse(dataStr);
+                            
+                            // Real-time token streaming
+                            if (data.token) {
+                                statusDiv.textContent = "⚡ Streaming...";
+                                replyDiv.innerText += data.token;
+                            }
+                            
+                            // Parallel audio chunks (play as they arrive!)
+                            if (data.audio_chunk) {
+                                console.log("🔊 Received audio chunk", data.chunk_id || "");
+                                audioQueue.push({
+                                    data: data.audio_chunk,
+                                    mime: data.audio_mime || "audio/mpeg"
+                                });
+                                
+                                // Start playing if not already playing
+                                if (!isPlayingAudio) {
+                                    statusDiv.textContent = "🔊 AI Speaking...";
+                                    playNextAudio();
+                                }
+                            }
+
+                            // Error handling
+                            if (data.error) {
+                                replyDiv.innerText = "❌ Error: " + data.error;
+                                statusDiv.textContent = "❌ Error";
+                            }
+                        } catch (e) {
+                            console.error("Parse error:", e);
+                        }
+                    }
+                }
+
+                processStream(); // Continue reading
+            });
+        }
+
+        processStream();
+    })
+    .catch(err => {
+        console.error("Fetch error:", err);
+        statusDiv.textContent = "❌ Network error";
+        replyDiv.innerText = "❌ Error: " + err.message;
+        
+        // Resume mic on error too
+        if (!isListening && recognition) {
+            setTimeout(() => {
+                try {
+                    recognition.start();
+                    isListening = true;
+                    document.getElementById("micButton").textContent = "⏹ Stop Mic";
+                } catch (e) {}
+            }, 1000);
+        }
+    });
+}
+
+// Wire buttons after DOM is loaded
+document.addEventListener("DOMContentLoaded", () => {
+    const micBtn = document.getElementById("micButton");
+    const sendBtn = document.getElementById("sendButton");
+
+    if (micBtn) micBtn.addEventListener("click", toggleMic);
+    if (sendBtn) sendBtn.addEventListener("click", () => {
+        const text = document.getElementById("inputText").value || "";
+        sendToServer(text);
+    });
+    });
+</script>
+
+</body>
+</html>
